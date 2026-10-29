@@ -788,9 +788,7 @@ func isV2TimeSeriesOldFilter(metrics *queueManagerMetrics, baseTime time.Time, s
 // seriesMetricType returns the effective MetricType for a series from type-and-unit labels or cached WAL metadata.
 func (t *QueueManager) seriesMetricType(lbls labels.Labels, meta unique.Handle[metadata.Metadata]) model.MetricType {
 	if t.enableTypeAndUnitLabels {
-		if mType := schema.NewMetadataFromLabels(lbls).Type; mType != model.MetricTypeUnknown {
-			return mType
-		}
+		return schema.NewMetadataFromLabels(lbls).Type
 	}
 	if !metadata.IsZeroHandle(meta) {
 		return meta.Value().Type
@@ -2409,29 +2407,28 @@ func populateV2TimeSeries(symbolTable *writev2.SymbolsTable, batch []timeSeries,
 	var nPendingSamples, nPendingExemplars, nPendingHistograms, nUnexpectedMetadata int
 	for nPending, d := range batch {
 		pendingData[nPending].Samples = pendingData[nPending].Samples[:0]
-		var (
-			mType = model.MetricTypeUnknown
-			unit  string
-			help  string
-		)
-		if !metadata.IsZeroHandle(d.metadata) {
-			meta := d.metadata.Value()
-			mType = meta.Type
-			unit = meta.Unit
-			help = meta.Help
-		}
-		if enableTypeAndUnitLabels {
+		switch {
+		case enableTypeAndUnitLabels:
 			m := schema.NewMetadataFromLabels(d.seriesLabels)
-			if m.Type != model.MetricTypeUnknown {
-				mType = m.Type
+			pendingData[nPending].Metadata.Type = writev2.FromMetadataType(m.Type)
+			pendingData[nPending].Metadata.UnitRef = symbolTable.Symbolize(m.Unit)
+			pendingData[nPending].Metadata.HelpRef = 0 // Type and unit does not give us help.
+			// Use Help from d.metadata if available.
+			if !metadata.IsZeroHandle(d.metadata) {
+				pendingData[nPending].Metadata.HelpRef = symbolTable.Symbolize(d.metadata.Value().Help)
 			}
-			if m.Unit != "" {
-				unit = m.Unit
-			}
+		case !metadata.IsZeroHandle(d.metadata):
+			meta := d.metadata.Value()
+			pendingData[nPending].Metadata.Type = writev2.FromMetadataType(meta.Type)
+			pendingData[nPending].Metadata.HelpRef = symbolTable.Symbolize(meta.Help)
+			pendingData[nPending].Metadata.UnitRef = symbolTable.Symbolize(meta.Unit)
+		default:
+			// Safeguard against sending garbage in case of not having metadata
+			// for whatever reason.
+			pendingData[nPending].Metadata.Type = writev2.FromMetadataType(model.MetricTypeUnknown)
+			pendingData[nPending].Metadata.UnitRef = 0
+			pendingData[nPending].Metadata.HelpRef = 0
 		}
-		pendingData[nPending].Metadata.Type = writev2.FromMetadataType(mType)
-		pendingData[nPending].Metadata.UnitRef = symbolTable.Symbolize(unit)
-		pendingData[nPending].Metadata.HelpRef = symbolTable.Symbolize(help)
 
 		if sendExemplars {
 			pendingData[nPending].Exemplars = pendingData[nPending].Exemplars[:0]
